@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/bits"
 	"math/rand"
 	"os"
 	"sort"
@@ -20,8 +21,8 @@ func main() {
 
 	//processFile("data/a_example") // Example
 	//processFile("data/b_lovely_landscapes") // All Horizontal
-	processFile("data/c_memorable_moments") // Mixed small
-	//processFile("data/d_pet_pictures") // Mixed large
+	//processFile("data/c_memorable_moments") // Mixed small
+	processFile("data/d_pet_pictures") // Mixed large
 	//processFile("data/e_shiny_selfies") // All vertical
 
 }
@@ -33,10 +34,10 @@ const populationSize = 1000
 const elitismFactor = 0.1
 
 // useRoulette defines if we use the roulette algorithm for breeding selection. Otherwise use tournament.
-const useRoulette = true
+const useRoulette = false
 
 // mutationFactor is the factor applied to each gene to determine if it mutates, keep it small
-const mutationFactor = 0.001
+const mutationFactor = 0.0005
 
 // orientation is the orientation of a photo defined as vertical or horizontal.
 type orientation int
@@ -51,12 +52,20 @@ type photoDefinition struct {
 	index       int
 	orientation orientation
 	tags        map[string]bool
+	tagBits     []uint64
+	nbTags      int
 }
 
 // scoreResult glues together an index in the population and its score.
 type scoreResult struct {
 	genomeIndex int
 	score       int
+}
+
+// childrenResult glues together an index and a children genome
+type childrenResult struct {
+	childrenId int
+	genome     *[]int
 }
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -71,8 +80,6 @@ func processFile(fileName string) {
 	photos := readFile(fileName)
 	fmt.Printf("Read %v images\n", len(*photos))
 
-	messages := make(chan scoreResult)
-
 	population := createInitialPopulation(len(*photos), populationSize)
 	scores := make([]int, populationSize)
 
@@ -80,34 +87,13 @@ func processFile(fileName string) {
 
 		fmt.Printf("Generation: %v\n", round)
 
-		// Score the population
-		start := time.Now()
-		for i := 0; i < len(population); i++ {
-			go func(genomeIndex int) {
-				score := scoreGenome(photos, population[genomeIndex])
-				messages <- scoreResult{genomeIndex, score}
-			}(i)
-		}
-
-		// Receive the scores
-		for i := 0; i < len(population); i++ {
-			result := <-messages
-			scores[result.genomeIndex] = result.score
-		}
-
-		fmt.Printf("genome scored in %v\n", time.Since(start))
+		scores = scorePopulation(photos, population)
 
 		analyzeScores(scores)
 
-		start = time.Now()
 		population = breed(population, scores)
 
-		fmt.Printf("population breeded in %v\n", time.Since(start))
-
-		start = time.Now()
 		mutate(population)
-
-		fmt.Printf("population mutated in %v\n", time.Since(start))
 	}
 
 	// Rank the scores
@@ -163,14 +149,51 @@ func createInitialPopulation(genomeSize int, populationSize int) []*[]int {
 //
 // -------------------------------------------------------------------------------------------------------------------
 
+func scorePopulation(photos *[]photoDefinition, population []*[]int) []int {
+
+	scores := make([]int, len(population))
+
+	messages := make(chan scoreResult)
+
+	// Score the population
+	start := time.Now()
+	for i := 0; i < len(population); i++ {
+		go func(genomeIndex int) {
+			score := scoreGenome(photos, population[genomeIndex])
+			messages <- scoreResult{genomeIndex, score}
+		}(i)
+	}
+
+	// Receive the scores
+	for i := 0; i < len(population); i++ {
+		result := <-messages
+		scores[result.genomeIndex] = result.score
+	}
+
+	close(messages)
+
+	fmt.Printf("genome scored in %v\n", time.Since(start))
+
+	return scores
+}
+
 // scoreGenome scores a genome. The resulting score "should" be the Google Score. The slideware is generated as a slide
 // for each horizontal photo and a slice for each pair of vertical photo. For pair the slide is generated when the
 // second member of the pair is found
 func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 
-	var previousVertical *photoDefinition
-	var previousSliceTags map[string]bool
+	// Information about the previous slide (whatever if 2 vertical or a single horizontal)
+	previousSlideTags := make([]uint64, len((*photos)[0].tagBits))
+	previousSlideNbTags := 0
 
+	// The previous vertical, so that when finding a vertical it is possible to create slide
+	var previousVertical *photoDefinition
+
+	// temporary variable for computing a 2 * vertical slide to avoid loop allocation
+	verticalSlideTags := make([]uint64, len((*photos)[0].tagBits))
+	verticalSlideNbTags := 0
+
+	// The score
 	score := 0
 
 	for _, photoIndex := range *genome {
@@ -178,28 +201,44 @@ func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 		photo := (*photos)[photoIndex]
 
 		// If initialization of scoring
-		if previousSliceTags == nil {
+		if previousSlideTags == nil {
 			if photo.orientation == horizontal {
-				previousSliceTags = photo.tags
+				previousSlideTags = photo.tagBits
 			} else {
 				if previousVertical == nil {
 					previousVertical = &photo
 				} else {
-					previousSliceTags = addSets(previousVertical.tags, photo.tags)
+					// Sum the current vertical and the previous one to make the tag bits of the fist slide
+					previousSlideNbTags = 0
+					for i := 0; i < len(previousSlideTags); i++ {
+						previousSlideTags[i] = previousVertical.tagBits[i] | photo.tagBits[i]
+						previousSlideNbTags += bits.OnesCount64(previousSlideTags[i])
+					}
 					previousVertical = nil
 				}
 			}
 		} else {
 			if photo.orientation == horizontal {
-				score += scoreSets(previousSliceTags, photo.tags)
-				previousSliceTags = photo.tags
+				// Compute the score
+				score += scoreSets(previousSlideTags, previousSlideNbTags, photo.tagBits, photo.nbTags)
+				// Keep the current slide as the previous one
+				previousSlideTags = photo.tagBits
+				previousSlideNbTags = photo.nbTags
 			} else {
 				if previousVertical == nil {
 					previousVertical = &photo
 				} else {
-					tags := addSets(previousVertical.tags, photo.tags)
-					score += scoreSets(previousSliceTags, photo.tags)
-					previousSliceTags = tags
+					// Sum the current vertical and the previous one to make the tag bits of the slide
+					verticalSlideNbTags = 0
+					for i := 0; i < len(previousSlideTags); i++ {
+						verticalSlideTags[i] = previousVertical.tagBits[i] | photo.tagBits[i]
+						verticalSlideNbTags += bits.OnesCount64(verticalSlideTags[i])
+					}
+					// Compute the score
+					score += scoreSets(previousSlideTags, previousSlideNbTags, verticalSlideTags, verticalSlideNbTags)
+					// Keep the current slide as the previous one
+					previousSlideTags = verticalSlideTags
+					previousSlideNbTags = verticalSlideNbTags
 				}
 			}
 		}
@@ -208,36 +247,23 @@ func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 	return score
 }
 
-// addSets adds two sets into a new one. This function is used to for having the tags of a pair of vertical photos.
-func addSets(set1 map[string]bool, set2 map[string]bool) map[string]bool {
-	results := make(map[string]bool)
-	for k := range set1 {
-		results[k] = true
-	}
-	for k := range set2 {
-		results[k] = true
-	}
-	return results
-}
-
 // scoreSets computes the score of two slides, each slide being a set of tags
-func scoreSets(set1 map[string]bool, set2 map[string]bool) int {
+func scoreSets(bits1 []uint64, nbBitsOn1 int, bits2 []uint64, nbBitsOn2 int) int {
 
 	commonTags := 0
-	for tag := range set1 {
-		if _, ok := set2[tag]; ok {
-			commonTags++
-		}
+	for i := 0; i < len(bits1); i++ {
+		tmp := bits1[i] & bits2[i]
+		commonTags += bits.OnesCount64(tmp)
 	}
 
 	minimum := commonTags
 
-	if v := len(set1) - commonTags; v < minimum {
-		minimum = v
+	if nbBitSpecific1 := nbBitsOn1 - commonTags; nbBitSpecific1 < minimum {
+		minimum = nbBitSpecific1
 	}
 
-	if v := len(set2) - commonTags; v < minimum {
-		minimum = v
+	if nbBitSpecific2 := nbBitsOn2 - minimum; nbBitSpecific2 < minimum {
+		minimum = nbBitSpecific2
 	}
 
 	return minimum
@@ -252,6 +278,8 @@ func scoreSets(set1 map[string]bool, set2 map[string]bool) int {
 // breed takes a population and its score and generate a new population to be scored. The breed is elitist and keeps
 // the top `elitismFactor` of the best parents.
 func breed(population []*[]int, scores []int) []*[]int {
+
+	start := time.Now()
 
 	// Rank the scores
 	bestScores := make([]scoreResult, len(scores))
@@ -275,26 +303,45 @@ func breed(population []*[]int, scores []int) []*[]int {
 		results[i] = population[bestScores[i].genomeIndex]
 	}
 
+	messages := make(chan childrenResult)
+
 	// Create new children
 	for i := elitismKept; i < len(population); i++ {
-
-		var breeder1, breeder2 int
-		if useRoulette {
-			breeder1 = selectBreederByRoulette(scores)
-			breeder2 = selectBreederByRoulette(scores)
-		} else {
-			breeder1 = selectBreederByTournament(scores)
-			breeder2 = selectBreederByTournament(scores)
-		}
-		children := crossOver(population[breeder1], population[breeder2])
-		results[i] = children
+		go func(childrenId int) {
+			children := fornicate(population, scores)
+			messages <- childrenResult{childrenId, children}
+		}(i)
 	}
+
+	// Receive the children
+	for i := elitismKept; i < len(population); i++ {
+		result := <-messages
+		results[result.childrenId] = result.genome
+	}
+
+	close(messages)
+
+	fmt.Printf("population breeded in %v\n", time.Since(start))
 
 	return results
 }
 
+// fornicate chooses two parents and make a new children
+func fornicate(population []*[]int, scores []int) *[]int {
+
+	var breeder1, breeder2 int
+	if useRoulette {
+		breeder1 = selectBreederByRoulette(scores, -1)
+		breeder2 = selectBreederByRoulette(scores, breeder1)
+	} else {
+		breeder1 = selectBreederByTournament(scores, -1)
+		breeder2 = selectBreederByTournament(scores, breeder1)
+	}
+	return crossOver(population[breeder1], population[breeder2])
+}
+
 // selectBreederByRoulette selects randomly a breeder by using a roulette algorithm.
-func selectBreederByRoulette(scores []int) int {
+func selectBreederByRoulette(scores []int, forbiddenBreeder int) int {
 
 	sumScores := 0
 	for _, v := range scores {
@@ -304,18 +351,26 @@ func selectBreederByRoulette(scores []int) int {
 	// Rand limits are inclusive
 	random := rand.Intn(sumScores)
 	sum := 0
-	for i, v := range scores {
-		sum += v
-		if sum >= random {
-			return i
+
+	// While the selected breeder is the forbidden bridder, find a breeder
+	breederSelected := forbiddenBreeder
+	for breederSelected == forbiddenBreeder {
+		for i, v := range scores {
+			sum += v
+			if sum >= random {
+				// A breeder was found, quit the search loop
+				breederSelected = i
+				break
+			}
 		}
 	}
-	// should not happen
-	return 0
+
+	// Return the selected breeder
+	return breederSelected
 }
 
 // selectBreederByRoulette selects randomly a breeder by using a tournament algorithm.
-func selectBreederByTournament(scores []int) int {
+func selectBreederByTournament(scores []int, forbiddenBreeder int) int {
 
 	tournamentSize := len(scores) / 8
 
@@ -323,10 +378,10 @@ func selectBreederByTournament(scores []int) int {
 	var bestBreeder int
 
 	for i := 0; i < tournamentSize; i++ {
-		random := rand.Intn(len(scores))
-		if scores[random] > bestScore {
-			bestScore = scores[random]
-			bestBreeder = random
+		possibleBreeder := rand.Intn(len(scores))
+		if scores[possibleBreeder] > bestScore && possibleBreeder != forbiddenBreeder {
+			bestScore = scores[possibleBreeder]
+			bestBreeder = possibleBreeder
 		}
 	}
 
@@ -347,7 +402,7 @@ func crossOver(parent1 *[]int, parent2 *[]int) *[]int {
 	children := make([]int, size)
 	alreadyFromParent1 := make(map[int]bool, length)
 
-	for i := start; i < length; i++ {
+	for i := start; i < start+length; i++ {
 		parent1Value := (*parent1)[i]
 		children[i] = parent1Value
 		alreadyFromParent1[parent1Value] = true
@@ -382,25 +437,37 @@ func crossOver(parent1 *[]int, parent2 *[]int) *[]int {
 
 // -------------------------------------------------------------------------------------------------------------------
 //
-//                                    MUTATTION FUNCTIONS
+//                                    MUTATION FUNCTIONS
 //
 // -------------------------------------------------------------------------------------------------------------------
 
 // mutate applies random mutation on a population. Mutations are made by swapping the mutated gene with another.
 func mutate(population []*[]int) {
 
-	// For all genomes
-	for _, genome := range population {
-		genomeSize := len(*genome)
-		// For all genes
-		for i, gene := range *genome {
-			// If the gene is to be mutated
-			if rand.Float64() < mutationFactor {
+	start := time.Now()
 
-				// Make a random swap
-				idxTarget := rand.Intn(genomeSize)
+	// Parallel mutations are way slower (3*times) than brute force mutation
+	// So just brute force it
+	for _, genome := range population {
+		mutateGenome(genome)
+	}
+
+	fmt.Printf("population mutated in %v\n", time.Since(start))
+}
+
+// mutate applies random mutation on a population. Mutations are made by swapping the mutated gene with another.
+func mutateGenome(genome *[]int) {
+
+	genomeSize := len(*genome)
+	// For all genes
+	for i := range *genome {
+		// If the gene is to be mutated
+		if rand.Float64() < mutationFactor {
+
+			// Make a random swap, but not with self
+			if idxTarget := rand.Intn(genomeSize); idxTarget != i {
 				temp := (*genome)[idxTarget]
-				(*genome)[idxTarget] = gene
+				(*genome)[idxTarget] = (*genome)[i]
 				(*genome)[i] = temp
 			}
 		}
@@ -455,9 +522,9 @@ func readFile(fileName string) *[]photoDefinition {
 			photoOrientation = vertical
 		}
 
-		nbTags, err := strconv.Atoi(lineItems[1])
-		if err != nil {
-			log.Fatal(err)
+		nbTags, e := strconv.Atoi(lineItems[1])
+		if e != nil {
+			log.Fatal(e)
 		}
 
 		tags := make(map[string]bool, nbTags)
@@ -470,6 +537,51 @@ func readFile(fileName string) *[]photoDefinition {
 			index:       i,
 			orientation: photoOrientation,
 			tags:        tags,
+			tagBits:     nil,
+			nbTags:      len(tags),
+		}
+	}
+
+	// Collect all tags in a set
+	tagsCollector := make(map[string]bool)
+	// Collect all tags
+	for _, photo := range photos {
+		for tag := range photo.tags {
+			tagsCollector[tag] = true
+		}
+	}
+
+	// Get the key of the set to a list (ensure constant order)
+	tags := make([]string, len(tagsCollector))
+	idx := 0
+	for tag := range tagsCollector {
+		tags[idx] = tag
+		idx++
+	}
+
+	// Number of uint64 needed by image
+	nbUint64 := int(math.Ceil(float64(len(tags)) / 64.0))
+
+	// Add the bytes to the image
+	for i := 0; i < len(photos); i++ {
+		photos[i].tagBits = make([]uint64, nbUint64)
+	}
+
+	// For each tag
+	for tagIndex, tag := range tags {
+
+		// Compute the position of the bit
+		uint64idx := int(math.Floor(float64(tagIndex) / 64.0))
+		posInUint64 := uint(tagIndex % 64)
+		bitToSet := uint64(1) << posInUint64
+
+		// For each photo
+		for i := 0; i < len(photos); i++ {
+			// If the photo has the tag
+			if _, ok := photos[i].tags[tag]; ok {
+				// Set the bit
+				photos[i].tagBits[uint64idx] |= bitToSet
+			}
 		}
 	}
 
