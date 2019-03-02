@@ -21,7 +21,7 @@ As of now, just the scoring function is run in parallel as it is the most time c
 
 # License
 
-Copyright 2018 Thomas Wuillemin  <thomas.wuillemin@gmail.com>
+Copyright 2019 Thomas Wuillemin  <thomas.wuillemin@gmail.com>
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this project or its content except in compliance with the License.
