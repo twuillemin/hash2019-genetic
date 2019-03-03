@@ -18,7 +18,8 @@ As of now, just the scoring function is run in parallel as it is the most time c
 #Versions
 
  * v0.0.1: Original version
- * v0.0.2: Enhance peformances (up to 30x)
+ * v0.0.2: Enhance performances (up to 30x)
+ * v0.0.3: Add support for sparse tags and detection of the maximum 
 
 # License
 

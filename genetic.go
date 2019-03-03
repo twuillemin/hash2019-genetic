@@ -19,13 +19,16 @@ func main() {
 	// Init the randomness
 	rand.Seed(time.Now().UnixNano())
 
-	//processFile("data/a_example") // Example
-	//processFile("data/b_lovely_landscapes") // All Horizontal
-	//processFile("data/c_memorable_moments") // Mixed small
-	processFile("data/d_pet_pictures") // Mixed large
-	//processFile("data/e_shiny_selfies") // All vertical
+	processFile("data/a_example")           // Example
+	processFile("data/b_lovely_landscapes") // All Horizontal
+	processFile("data/c_memorable_moments") // Mixed small
+	processFile("data/d_pet_pictures")      // Mixed large
+	processFile("data/e_shiny_selfies")     // All vertical
 
 }
+
+// maximumSteps is the maximum number of steps to be run
+const maximumSteps = 20
 
 // populationSize is the size of the population.
 const populationSize = 1000
@@ -77,19 +80,37 @@ type childrenResult struct {
 // processFile processes entirely a file from reading its data to generating the results. This is the heart of the process
 func processFile(fileName string) {
 
-	photos := readFile(fileName)
-	fmt.Printf("Read %v images\n", len(*photos))
+	fmt.Printf("Start processing: %v\n", fileName)
+
+	photos, tags := readFile(fileName)
+
+	// Detect if tags are sparse
+	sparseTags := false
+	if len(tags) > len(*photos) {
+		fmt.Printf("Sparse tags detected\n")
+		sparseTags = true
+	}
 
 	population := createInitialPopulation(len(*photos), populationSize)
 	scores := make([]int, populationSize)
 
-	for round := 0; round < 100; round++ {
+	currentMax := -1
+	stableMaxCount := 0
+
+	// Obviously there are better strategies than
+	for round := 0; round < maximumSteps && stableMaxCount < 10; round++ {
 
 		fmt.Printf("Generation: %v\n", round)
 
-		scores = scorePopulation(photos, population)
+		scores = scorePopulation(photos, population, sparseTags)
 
-		analyzeScores(scores)
+		max := analyzeScores(scores)
+		if max == currentMax {
+			stableMaxCount++
+		} else {
+			currentMax = max
+			stableMaxCount = 0
+		}
 
 		population = breed(population, scores)
 
@@ -149,7 +170,7 @@ func createInitialPopulation(genomeSize int, populationSize int) []*[]int {
 //
 // -------------------------------------------------------------------------------------------------------------------
 
-func scorePopulation(photos *[]photoDefinition, population []*[]int) []int {
+func scorePopulation(photos *[]photoDefinition, population []*[]int, sparseTags bool) []int {
 
 	scores := make([]int, len(population))
 
@@ -159,7 +180,12 @@ func scorePopulation(photos *[]photoDefinition, population []*[]int) []int {
 	start := time.Now()
 	for i := 0; i < len(population); i++ {
 		go func(genomeIndex int) {
-			score := scoreGenome(photos, population[genomeIndex])
+			score := 0
+			if sparseTags {
+				score = scoreGenomeSparse(photos, population[genomeIndex])
+			} else {
+				score = scoreGenome(photos, population[genomeIndex])
+			}
 			messages <- scoreResult{genomeIndex, score}
 		}(i)
 	}
@@ -220,7 +246,7 @@ func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 		} else {
 			if photo.orientation == horizontal {
 				// Compute the score
-				score += scoreSets(previousSlideTags, previousSlideNbTags, photo.tagBits, photo.nbTags)
+				score += getInterestByBits(previousSlideTags, previousSlideNbTags, photo.tagBits, photo.nbTags)
 				// Keep the current slide as the previous one
 				previousSlideTags = photo.tagBits
 				previousSlideNbTags = photo.nbTags
@@ -235,7 +261,7 @@ func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 						verticalSlideNbTags += bits.OnesCount64(verticalSlideTags[i])
 					}
 					// Compute the score
-					score += scoreSets(previousSlideTags, previousSlideNbTags, verticalSlideTags, verticalSlideNbTags)
+					score += getInterestByBits(previousSlideTags, previousSlideNbTags, verticalSlideTags, verticalSlideNbTags)
 					// Keep the current slide as the previous one
 					previousSlideTags = verticalSlideTags
 					previousSlideNbTags = verticalSlideNbTags
@@ -247,8 +273,8 @@ func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 	return score
 }
 
-// scoreSets computes the score of two slides, each slide being a set of tags
-func scoreSets(bits1 []uint64, nbBitsOn1 int, bits2 []uint64, nbBitsOn2 int) int {
+// getInterestByBits computes the score of two slides by their tag vectors
+func getInterestByBits(bits1 []uint64, nbBitsOn1 int, bits2 []uint64, nbBitsOn2 int) int {
 
 	commonTags := 0
 	for i := 0; i < len(bits1); i++ {
@@ -262,8 +288,102 @@ func scoreSets(bits1 []uint64, nbBitsOn1 int, bits2 []uint64, nbBitsOn2 int) int
 		minimum = nbBitSpecific1
 	}
 
-	if nbBitSpecific2 := nbBitsOn2 - minimum; nbBitSpecific2 < minimum {
+	if nbBitSpecific2 := nbBitsOn2 - commonTags; nbBitSpecific2 < minimum {
 		minimum = nbBitSpecific2
+	}
+
+	return minimum
+}
+
+// scoreGenome scores a genome. The resulting score "should" be the Google Score. The slideware is generated as a slide
+// for each horizontal photo and a slice for each pair of vertical photo. For pair the slide is generated when the
+// second member of the pair is found
+func scoreGenomeSparse(photos *[]photoDefinition, genome *[]int) int {
+
+	// Information about the previous slide (whatever if 2 vertical or a single horizontal)
+	previousSlideTags := make(map[string]bool)
+
+	// The previous vertical, so that when finding a vertical it is possible to create slide
+	var previousVertical *photoDefinition
+
+	// The score
+	score := 0
+
+	for _, photoIndex := range *genome {
+
+		photo := (*photos)[photoIndex]
+
+		// If initialization of scoring
+		if len(previousSlideTags) == 0 {
+			if photo.orientation == horizontal {
+				previousSlideTags = photo.tags
+			} else {
+				if previousVertical == nil {
+					previousVertical = &photo
+				} else {
+					// Sum the current vertical and the previous one to make the tag bits of the fist slide
+					previousSlideTags = make(map[string]bool)
+					for k := range previousVertical.tags {
+						previousSlideTags[k] = true
+					}
+					for k := range photo.tags {
+						previousSlideTags[k] = true
+					}
+
+					previousVertical = nil
+				}
+			}
+		} else {
+			if photo.orientation == horizontal {
+				// Compute the score
+				score += getInterestByTag(previousSlideTags, photo.tags)
+
+				// Keep the current slide as the previous one
+				previousSlideTags = photo.tags
+			} else {
+				if previousVertical == nil {
+					previousVertical = &photo
+				} else {
+					// Sum the current vertical and the previous one to make the tag bits of the fist slide
+					verticalSlideTags := make(map[string]bool)
+					for k := range previousVertical.tags {
+						verticalSlideTags[k] = true
+					}
+					for k := range photo.tags {
+						verticalSlideTags[k] = true
+					}
+
+					// Compute the score
+					score += getInterestByTag(verticalSlideTags, photo.tags)
+
+					// Keep the current slide as the previous one
+					previousSlideTags = verticalSlideTags
+				}
+			}
+		}
+	}
+
+	return score
+}
+
+// getInterestByTag computes the score of two slides by their tags
+func getInterestByTag(tags1 map[string]bool, tags2 map[string]bool) int {
+
+	commonTags := 0
+	for tag := range tags1 {
+		if _, ok := tags2[tag]; ok {
+			commonTags++
+		}
+	}
+
+	minimum := commonTags
+
+	if nbTagSpecific1 := len(tags1) - commonTags; nbTagSpecific1 < minimum {
+		minimum = nbTagSpecific1
+	}
+
+	if nbTagSpecific2 := len(tags2) - commonTags; nbTagSpecific2 < minimum {
+		minimum = nbTagSpecific2
 	}
 
 	return minimum
@@ -481,7 +601,14 @@ func mutateGenome(genome *[]int) {
 // -------------------------------------------------------------------------------------------------------------------
 
 // readFiles reads the definition of the photos
-func readFile(fileName string) *[]photoDefinition {
+func readFile(fileName string) (*[]photoDefinition, map[string]int) {
+
+	// Get the tags
+	allTags := readTagsFromFile(fileName)
+	// Number of uint64 needed by image
+	vectorTagSize := int(math.Ceil(float64(len(allTags)) / 64.0))
+
+	fmt.Printf("Found %v distinct tags (vector size is %v)\n", len(allTags), vectorTagSize)
 
 	file, err := os.Open(fileName)
 	if err != nil {
@@ -528,64 +655,86 @@ func readFile(fileName string) *[]photoDefinition {
 		}
 
 		tags := make(map[string]bool, nbTags)
+		vectorTags := make([]uint64, vectorTagSize)
 
 		for j := 0; j < nbTags; j++ {
-			tags[lineItems[j+2]] = true
+
+			tag := lineItems[j+2]
+
+			tags[tag] = true
+
+			tagIndex := allTags[tag]
+
+			// Compute the position of the bit
+			uint64idx := uint(tagIndex) >> 6
+			posInUint64 := uint(tagIndex % 64)
+			bitToSet := uint64(1) << posInUint64
+
+			// Set the bit
+			vectorTags[uint64idx] |= bitToSet
 		}
 
 		photos[i] = photoDefinition{
 			index:       i,
 			orientation: photoOrientation,
 			tags:        tags,
-			tagBits:     nil,
-			nbTags:      len(tags),
+			tagBits:     vectorTags,
+			nbTags:      len(allTags),
 		}
 	}
 
-	// Collect all tags in a set
-	tagsCollector := make(map[string]bool)
-	// Collect all tags
-	for _, photo := range photos {
-		for tag := range photo.tags {
-			tagsCollector[tag] = true
+	fmt.Printf("Read %v images\n", len(photos))
+
+	return &photos, allTags
+}
+
+// readFiles reads the definition of the photos
+func readTagsFromFile(fileName string) map[string]int {
+
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer func() {
+		if e := file.Close(); e != nil {
+			log.Panic(err)
 		}
+	}()
+
+	scanner := bufio.NewScanner(file)
+
+	// Read the header line
+	scanner.Scan()
+	headerLine := scanner.Text()
+
+	nbImages, err := strconv.Atoi(headerLine)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// Get the key of the set to a list (ensure constant order)
-	tags := make([]string, len(tagsCollector))
-	idx := 0
-	for tag := range tagsCollector {
-		tags[idx] = tag
-		idx++
-	}
+	tags := make(map[string]int)
 
-	// Number of uint64 needed by image
-	nbUint64 := int(math.Ceil(float64(len(tags)) / 64.0))
+	for i := 0; i < nbImages; i++ {
+		scanner.Scan()
+		line := scanner.Text()
 
-	// Add the bytes to the image
-	for i := 0; i < len(photos); i++ {
-		photos[i].tagBits = make([]uint64, nbUint64)
-	}
+		if e := scanner.Err(); e != nil {
+			log.Fatal(e)
+		}
 
-	// For each tag
-	for tagIndex, tag := range tags {
+		lineItems := strings.Split(line, " ")
 
-		// Compute the position of the bit
-		uint64idx := int(math.Floor(float64(tagIndex) / 64.0))
-		posInUint64 := uint(tagIndex % 64)
-		bitToSet := uint64(1) << posInUint64
-
-		// For each photo
-		for i := 0; i < len(photos); i++ {
-			// If the photo has the tag
-			if _, ok := photos[i].tags[tag]; ok {
-				// Set the bit
-				photos[i].tagBits[uint64idx] |= bitToSet
+		for tagIdx := 2; tagIdx < len(lineItems); tagIdx++ {
+			tag := lineItems[tagIdx]
+			if _, ok := tags[tag]; !ok {
+				idx := len(tags)
+				tags[tag] = idx
 			}
 		}
 	}
 
-	return &photos
+	return tags
 }
 
 // writeFile writes a genome to an output file
@@ -633,8 +782,8 @@ func writeFile(photos *[]photoDefinition, genome *[]int, fileName string) {
 //
 // -------------------------------------------------------------------------------------------------------------------
 
-// analyzeScores displays information about the score computed (mean, avg, etc.)
-func analyzeScores(scores []int) {
+// analyzeScores displays information about the score computed (mean, avg, etc.) and return the best score
+func analyzeScores(scores []int) int {
 
 	min := 1000000
 	max := -1
@@ -661,4 +810,6 @@ func analyzeScores(scores []int) {
 	deviation := math.Sqrt(sumDiffMeanSquared / float64(len(scores)))
 
 	fmt.Printf("Min: %v, Max: %v, Mean: %v, Deviation: %v\n", min, max, mean, deviation)
+
+	return max
 }
