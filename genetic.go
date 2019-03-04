@@ -86,13 +86,15 @@ func processFile(fileName string) {
 
 	// Detect if tags are sparse
 	sparseTags := false
-	if len(tags) > len(*photos) {
+	if len(tags) > 10*len(*photos) {
 		fmt.Printf("Sparse tags detected\n")
 		sparseTags = true
 	}
 
 	population := createInitialPopulation(len(*photos), populationSize)
 	scores := make([]int, populationSize)
+
+	start := time.Now()
 
 	currentMax := -1
 	stableMaxCount := 0
@@ -105,6 +107,8 @@ func processFile(fileName string) {
 		scores = scorePopulation(photos, population, sparseTags)
 
 		max := analyzeScores(scores)
+
+		// If no better increment the stability counter otherwise reset it
 		if max == currentMax {
 			stableMaxCount++
 		} else {
@@ -112,9 +116,13 @@ func processFile(fileName string) {
 			stableMaxCount = 0
 		}
 
-		population = breed(population, scores)
+		// Only breed and mutate if stability is not reached
+		if stableMaxCount < 10 {
 
-		mutate(population)
+			population = breed(population, scores)
+
+			mutate(population)
+		}
 	}
 
 	// Rank the scores
@@ -129,6 +137,8 @@ func processFile(fileName string) {
 	sort.Slice(bestScores, func(i, j int) bool {
 		return bestScores[i].score > bestScores[j].score
 	})
+
+	fmt.Printf("Solution found in %v\n", time.Since(start))
 
 	// Write the results
 	writeFile(photos, population[bestScores[0].genomeIndex], fileName+".out")
@@ -260,6 +270,8 @@ func scoreGenome(photos *[]photoDefinition, genome *[]int) int {
 						verticalSlideTags[i] = previousVertical.tagBits[i] | photo.tagBits[i]
 						verticalSlideNbTags += bits.OnesCount64(verticalSlideTags[i])
 					}
+					// Remove the previous vertical
+					previousVertical = nil
 					// Compute the score
 					score += getInterestByBits(previousSlideTags, previousSlideNbTags, verticalSlideTags, verticalSlideNbTags)
 					// Keep the current slide as the previous one
@@ -353,8 +365,11 @@ func scoreGenomeSparse(photos *[]photoDefinition, genome *[]int) int {
 						verticalSlideTags[k] = true
 					}
 
+					// Remove the previous vertical
+					previousVertical = nil
+
 					// Compute the score
-					score += getInterestByTag(verticalSlideTags, photo.tags)
+					score += getInterestByTag(previousSlideTags, verticalSlideTags)
 
 					// Keep the current slide as the previous one
 					previousSlideTags = verticalSlideTags
@@ -710,7 +725,7 @@ func readFile(fileName string) (*[]photoDefinition, map[string]int) {
 			orientation: photoOrientation,
 			tags:        tags,
 			tagBits:     vectorTags,
-			nbTags:      len(allTags),
+			nbTags:      len(tags),
 		}
 	}
 
