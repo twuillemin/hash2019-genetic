@@ -28,7 +28,7 @@ func main() {
 }
 
 // maximumSteps is the maximum number of steps to be run
-const maximumSteps = 20
+const maximumSteps = 1000
 
 // populationSize is the size of the population.
 const populationSize = 1000
@@ -449,28 +449,59 @@ func breed(population []*[]int, scores []int) []*[]int {
 // fornicate chooses two parents and make a new children
 func fornicate(population []*[]int, scores []int) *[]int {
 
+	normalizedScores := normalizeScore(scores)
+
 	var breeder1, breeder2 int
 	if useRoulette {
-		breeder1 = selectBreederByRoulette(scores, -1)
-		breeder2 = selectBreederByRoulette(scores, breeder1)
+		breeder1 = selectBreederByRoulette(normalizedScores, -1)
+		breeder2 = selectBreederByRoulette(normalizedScores, breeder1)
 	} else {
-		breeder1 = selectBreederByTournament(scores, -1)
-		breeder2 = selectBreederByTournament(scores, breeder1)
+		breeder1 = selectBreederByTournament(normalizedScores, -1)
+		breeder2 = selectBreederByTournament(normalizedScores, breeder1)
 	}
 	return crossOver(population[breeder1], population[breeder2])
 }
 
-// selectBreederByRoulette selects randomly a breeder by using a roulette algorithm.
-func selectBreederByRoulette(scores []int, forbiddenBreeder int) int {
+func normalizeScore(scores []int) []float64 {
 
-	sumScores := 0
+	// Find the max and min of the scores
+	max := -1
+	min := 10000000
+	for i := range scores {
+		if scores[i] > max {
+			max = scores[i]
+		}
+		if scores[i] < min {
+			min = scores[i]
+		}
+	}
+
+	rangeScore := max - min
+
+	// Normalize the score
+	normalized := make([]float64, len(scores))
+	sumNormalized := 0.0
+	for i := range scores {
+		// normalizedScore is from 0 to 1
+		normalizedScore := float64(scores[i]-min) / float64(rangeScore)
+		normalized[i] = normalizedScore * normalizedScore
+		sumNormalized += normalized[i]
+	}
+
+	return normalized
+}
+
+// selectBreederByRoulette selects randomly a breeder by using a roulette algorithm.
+func selectBreederByRoulette(scores []float64, forbiddenBreeder int) int {
+
+	sumScores := 0.0
 	for _, v := range scores {
 		sumScores += v
 	}
 
 	// Rand limits are inclusive
-	random := rand.Intn(sumScores)
-	sum := 0
+	random := rand.Float64() * sumScores
+	sum := 0.0
 
 	// While the selected breeder is the forbidden bridder, find a breeder
 	breederSelected := forbiddenBreeder
@@ -490,11 +521,11 @@ func selectBreederByRoulette(scores []int, forbiddenBreeder int) int {
 }
 
 // selectBreederByRoulette selects randomly a breeder by using a tournament algorithm.
-func selectBreederByTournament(scores []int, forbiddenBreeder int) int {
+func selectBreederByTournament(scores []float64, forbiddenBreeder int) int {
 
 	tournamentSize := len(scores) / 8
 
-	bestScore := -1
+	bestScore := -1.0
 	var bestBreeder int
 
 	for i := 0; i < tournamentSize; i++ {
@@ -740,6 +771,31 @@ func readTagsFromFile(fileName string) map[string]int {
 // writeFile writes a genome to an output file
 func writeFile(photos *[]photoDefinition, genome *[]int, fileName string) {
 
+	previousVertical := -1
+
+	// Make an array for keeping the lines
+	lines := make([]string, 0)
+	lines = append(lines, "count")
+
+	for _, photoIndex := range *genome {
+
+		photo := (*photos)[photoIndex]
+
+		if photo.orientation == horizontal {
+			lines = append(lines, fmt.Sprintf("%v\n", photoIndex))
+		} else {
+			if previousVertical == -1 {
+				previousVertical = photoIndex
+			} else {
+				lines = append(lines, fmt.Sprintf("%v %v\n", previousVertical, photoIndex))
+				previousVertical = -1
+			}
+		}
+	}
+
+	// Adjust the size
+	lines[0] = fmt.Sprintf("%v\n", len(lines)-1)
+
 	file, err := os.Create(fileName)
 	if err != nil {
 		log.Panic(err)
@@ -751,27 +807,10 @@ func writeFile(photos *[]photoDefinition, genome *[]int, fileName string) {
 		}
 	}()
 
-	previousVertical := -1
-
-	for _, photoIndex := range *genome {
-
-		photo := (*photos)[photoIndex]
-
-		if photo.orientation == horizontal {
-			_, err = file.WriteString(fmt.Sprintf("%v\n", photoIndex))
-			if err != nil {
-				log.Panic(err)
-			}
-		} else {
-			if previousVertical == -1 {
-				previousVertical = photoIndex
-			} else {
-				_, err = file.WriteString(fmt.Sprintf("%v %v\n", previousVertical, photoIndex))
-				if err != nil {
-					log.Panic(err)
-				}
-				previousVertical = -1
-			}
+	for _, line := range lines {
+		_, err = file.WriteString(line)
+		if err != nil {
+			log.Panic(err)
 		}
 	}
 }
