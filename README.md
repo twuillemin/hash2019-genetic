@@ -1,4 +1,4 @@
-#Google Hash Code 2019 - Genetic algorithm implementation
+# Google Hash Code 2019 - Genetic algorithm implementation
 
 This project tries to solve the Google [Hash Code 2019](https://codingcompetitions.withgoogle.com/hashcode/) problem 
 using a genetic algorithm for searching the best solution.
@@ -15,7 +15,7 @@ finding an optimal solution requires a lot of steps ... that are time consuming.
 
 As of now, just the scoring function is run in parallel as it is the most time consuming operation
 
-#Versions
+# Versions
 
  * v0.0.1: Original version
  * v0.0.2: Enhance performances (up to 30x)
