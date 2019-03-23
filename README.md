@@ -20,6 +20,8 @@ As of now, just the scoring function is run in parallel as it is the most time c
  * v0.0.1: Original version
  * v0.0.2: Enhance performances (up to 30x)
  * v0.0.3: Add support for sparse tags and detection of the maximum 
+ * v0.1.0: Migrate from Bitbucket to Github
+ * v0.1.1: Fix typo 
 
 # License
 
